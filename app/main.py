@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 
 # 创建FastAPI实例
-app = FastAPI(title="企业RAG知识库问答服务")
+app = FastAPI(title="企业RAG知识库问答服务2026")
 
 # 跨域设置，支持前端网页调用
 app.add_middleware(
@@ -20,4 +20,4 @@ app.include_router(router)
 
 if __name__ == "__main__":
     #启动服务，reload=True仅用于开发环境，生产环境应关闭
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

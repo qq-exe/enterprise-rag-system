@@ -24,10 +24,12 @@ def get_retrieval_context(question: str, rag_service) -> List[Document]:
     # 执行双路召回（向量+BM25），并返回RRF融合后的结果
     # 向量检索：带相似度分数，并做阈值过滤
     vector_docs_with_score = rag_service.vector_db.similarity_search_with_relevance_scores(
-        question,k=10)
+        question,k=15)
     vector_docs = [doc for doc, score in vector_docs_with_score if score > 0.15]
     # BM25关键词检索
     bm25_docs = rag_service.bm25_retriever.invoke(question)
-    # 融合去重
-    return rrf_merge([vector_docs, bm25_docs])
+    # RRF 融合后，把 limit 也调大，暂不截断
+    merged = rrf_merge([vector_docs, bm25_docs])
     
+    # 这里直接返回合并后的前 10 个
+    return merged[:10]

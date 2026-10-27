@@ -37,45 +37,45 @@ class RAGService:
         return text
     
     def ingest_pdf(self, file_path: str) -> int:
-        # 解析、清洗、切分并存入向量库
-        loader = PyMuPDFLoader(file_path) # 替代PyPDFLoader,中文解析不乱码
+        loader = PyMuPDFLoader(file_path)
         docs = loader.load()
-
-        # 重点：跨页截断解决方案：合并所有页面，在每页开头注入【第N页】标记
-        # 解决了物理分页切断句子的痛点，保留了页码溯源能力
-        combined_text = ""
+        
+        final_splits = []
+        # 不搞合并了，直接遍历每一页
         for idx, doc in enumerate(docs):
             cleaned = self._clean_text(doc.page_content)
-            combined_text += f"【第{idx+1}页】 {cleaned}\n"
+            # 如果这页全是垃圾，跳过
+            if not cleaned.strip(): 
+                continue
+            
+            # 把每页当成一个独立的块，强制打上页码标签
+            page_doc = Document(
+                page_content=f"【第{idx+1}页】\n{cleaned}",
+                metadata={"source": doc.metadata.get("source", "未知文件")}
+            )
+            final_splits.append(page_doc)
 
-        # 将所有页面封装成一个大的Document，保留源文件信息
-        combined_doc = Document(
-            page_content=combined_text,
-            metadata={"source": docs[0].metadata.get("source", "未知文件")}
-        )
-
-        #针对中文优化切分策略：增大chunk_size和overLap,加入中文标点分隔符
+        # 如果某一页特别大（比如好几十页），我们再用 splitter 把它切小，但不需要重叠了
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=settings.CHUNK_SIZE,
-            chunk_overlap=settings.CHUNK_OVERLAP,
-            separators=["\n\n", "\n", "。",  "，", "！", "？", "", " "]
+            chunk_size=1000,
+            chunk_overlap=100,
+            separators=["\n\n", "\n", "。", "！", "？", "，", " ", ""]
         )
-        splits = splitter.split_documents([combined_doc])
-        # 过滤掉切分后太短的无效块（如文献参考的残渣）
-        splits = [s for s in splits if len(s.page_content.strip()) > 50]
+        final_splits = splitter.split_documents(final_splits)
+        final_splits = [s for s in final_splits if len(s.page_content.strip()) > 20]
 
-        # 向量化存入Chroma
         self.vector_db = Chroma.from_documents(
-            documents=splits,
+            documents=final_splits,
             embedding=embedding_model,
-            persist_directory=settings.CHROMA_PERSIST_DIR  
+            persist_directory=settings.CHROMA_PERSIST_DIR
         )
+        # ... 后面的 BM25 代码保持不变 ...
 
         # 构建BM25关键词检索器
-        self.bm25_retriever = BM25Retriever.from_documents(splits)
+        self.bm25_retriever = BM25Retriever.from_documents(final_splits)
         self.bm25_retriever.k = settings.TOP_K
 
-        return len(splits)
+        return len(final_splits)
 
 # 单条实例，全局唯一，避免重复初始化
 rag_service = RAGService()

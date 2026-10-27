@@ -41,37 +41,78 @@ async def rag_chat(question: str):
     context_text = "\n\n".join([d.page_content for d in raw_docs])
 
     # [Prompt优化] 软拒答引导+禁止编造+禁止重复输出
-    prompt = f"""你是一个企业知识库助手。请严格基于下面提供的知识库内容回答用户问题。
-    如果找不到答案，请说明没有相关信息，并总结相关主题内容，不要编造信息，禁止重复输出。
+    prompt = f"""你是一个严谨的企业设备手册助手。请严格基于下面提供的知识库内容回答用户问题。
+如果知识库内容中找不到答案，必须直接回答“根据已有知识库无法回答该问题”，绝对严禁自己编造任何步骤！
+如果找到了答案，请在你的回答最后，单独加上一行，格式必须一字不差地为：【参考页码：第X页】
 
-知识库内容:
+知识库内容：
 {context_text}
 
 用户问题：{question}
 """
+
 
     # [参数调优]调用本地Ollama模型，加入repeat_penalty 解决“复读机”问题
     resp = await run_in_threadpool(
         ollama.chat,
         model="qwen2.5:3b",
         messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0.2, "repeat_penalty": 1.15, "num_predict": 300}
-    )
+        options={"temperature": 0.2, "repeat_penalty": 1.15, "num_predict": 1000}
+    )  
 
-    # 【溯源信息组装】从文本中正则提取页码，只返回前2条最相关的，并截断文本防止前端臃肿
+    # 【溯源信息组装 - 终极物理+印刷页对齐版】
+    answer_content = resp["message"]["content"]
     references = []
-    for doc in raw_docs[:2]:
-        content = doc.page_content
-        print(f"正在检查的内容是: {content[:50]}")
-        page_match = re.search(r'【第(\d+)页】', content) 
-        page_num = page_match.group(0).replace("【第", "").replace("页】", "") if page_match else "未知"
-        references.append({
-            "soure_file": doc.metadata.get("source", "").split("/")[-1], #只保留文件名
-            "page_number": page_num,
-            "chunk_text": content[:200] + "..." #截取前200字，避免返回过长的文本
-        })
     
-    return ChatResponse(answer=resp["message"]["content"], references=references)
+    if raw_docs:
+        clean_question = re.sub(r'[^\w\u4e00-\u9fa5]', '', question)
+        keywords = [w for w in re.findall(r'[\u4e00-\u9fa5]{2,}', clean_question)]
+        if not keywords:
+            keywords = [clean_question]
+            
+        scored_docs = []
+        for doc in raw_docs:
+            content = doc.page_content
+            if re.search(r'[\.\。]{5,}', content):
+                continue
+            if "电话" in content and "邮箱" in content:
+                continue
+            if "邮编" in content and "Email" in content:
+                continue
+                
+            score = sum(content.count(kw) for kw in keywords)
+            
+            # 1. 先抓 PDF 物理页码
+            page_match = re.search(r'【第\s*(\d+)\s*页】', content)
+            physical_page = page_match.group(1) if page_match else "未知"
+            
+            # 2. 尝试抓取文档里印着的真实页码（比如 `- 21 -` 或者 `第 21 页`）
+            printed_page_match = re.search(r'-\s*(\d+)\s*-', content)
+            if not printed_page_match:
+                printed_page_match = re.search(r'第\s*(\d+)\s*页', content)
+            
+            # 3. 如果找到了印刷页码，就用印刷页码；没找到就用物理页码
+            final_page_num = printed_page_match.group(1) if printed_page_match else physical_page
+            
+            scored_docs.append({"score": score, "doc": doc, "page_num": final_page_num})
+            
+        # 4. 按得分降序排，只取第一名！
+        scored_docs.sort(key=lambda x: x["score"], reverse=True)
+        
+        # 只要得分最高的那 1 个，如果得分大于 0，就绝不返回第二个干扰项
+        for item in scored_docs[:1]:  
+            content = item["doc"].page_content
+            references.append({
+                "source_file": item["doc"].metadata.get("source", "").split("/")[-1],
+                "page_number": item["page_num"],
+                "chunk_text": re.sub(r'[\.\。]{5,}', '...', content[:250]).replace("\n", " ").replace("\\n", " ")
+            })
+
+    # 清洗换行符，并强行抹除大模型自己瞎编的页码字样
+    clean_answer = answer_content.replace("\\n", "\n").replace("\n\n", "\n")
+    clean_answer = re.sub(r'【参考页码：第\s*\d+\s*页】', '', clean_answer).strip()
+    
+    return ChatResponse(answer=clean_answer, references=references)
 
 @router.get("/health", response_model=HealthResponse)
 async def health():
